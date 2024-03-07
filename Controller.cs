@@ -18,6 +18,7 @@ namespace JbTlsClientWinForms
         private const int SERVER_PORT = 4666;
         private const String SERVER_FQDN = "JBTgBotJava8.example.com";
 
+
         public Controller() {
             logger.Info("Started");
             jBTlsClient = new JBTlsClient(SERVER_FQDN, SERVER_PORT, this);
@@ -31,6 +32,9 @@ namespace JbTlsClientWinForms
             if (telegramMessage != null && telegramMessage.getType == TelegramMessage.Type.STRING_OBJECT)
             {
                 logger.Debug(telegramMessage.ToString());
+                telegramMessage.Text = "Received: " + telegramMessage.Text;
+
+                jBTlsClient.Send(telegramMessage.Serialize(), JBTlsClient.MessageType.DATA);
             }
             else
                 logger.Error("Recived wrong TelegramMessage");

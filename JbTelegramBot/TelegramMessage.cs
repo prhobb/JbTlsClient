@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace JbTlsClientWinForms.Accesories
@@ -27,6 +28,9 @@ namespace JbTlsClientWinForms.Accesories
         long chatId;
 
         public Type getType { get => type; }
+        public string Text { get => text; set => text = value; }
+        public Bitmap Image { get => image; set => image = value; }
+        public long ChatId { get => chatId; set => chatId = value; }
 
         private TelegramMessage() { }
 
@@ -103,6 +107,9 @@ namespace JbTlsClientWinForms.Accesories
             TelegramMessage telegramMessage = new TelegramMessage();
 
             telegramMessage.type = (Type)message[TYPE_POSITION];
+            //Getting chatID
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(message, CHAT_ID_POSITION, 8);
             telegramMessage.chatId= BitConverter.ToInt64(message, CHAT_ID_POSITION);
 
             switch (telegramMessage.type)
