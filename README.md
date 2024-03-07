@@ -11,15 +11,8 @@ Using:
 
 When JBTlsClient recieves massage it calls JBTlsClientListener.OnSslReceive(byte[] buffer) method
 To send message use JBTlsClient.Send(byte[] message, MessageType messageType) method.
+MessageType should be DATA. KEEP_ALIVE using internally if this enabled on server side.
 
-You can look for using example in Controller class.
+You can see using example in Controller class.
 
-
-There can be only one Backend connected to JBTelegramBotFront. If new Backend connects old Backend will be disconnected.
-
-Otpfile and Database will be created with first run.
-
-You can add OTP to Otpfile mannualy or via JbTgAuthentication.AddOtp(String otp) method.
-
-Keepalive for Backend enabled by default. You can mange it with JbTlsClientSocket.setKeepalive(boolean keepalive) method.
-   
+Btw, this can be used as simple SSLClient without Telegram. You can Serialize and Deserialize anything, just give byte array as send buffer to JBTlsClient.Send. But it should be connected to JBTlsServer from Front part.
