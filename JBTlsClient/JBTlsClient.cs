@@ -183,11 +183,11 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                         new LocalCertificateSelectionCallback(SelectLocalCertificate)
                         );
                     sslStream.ReadTimeout = 2000;
-                    sslStream.WriteTimeout = 2000;
                     // The server name must match the name on the server certificate.
                     try
                     {
                         sslStream.AuthenticateAsClient(serverAddress);
+                        sslStream.ReadTimeout = System.Threading.Timeout.Infinite;
                     }
                     catch (AuthenticationException e)
                     {
