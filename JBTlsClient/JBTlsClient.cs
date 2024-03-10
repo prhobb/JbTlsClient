@@ -182,6 +182,7 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                         new RemoteCertificateValidationCallback(ValidateServerCertificate),
                         new LocalCertificateSelectionCallback(SelectLocalCertificate)
                         );
+                    sslStream.ReadTimeout = 2000;
                     // The server name must match the name on the server certificate.
                     try
                     {
