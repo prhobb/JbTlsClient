@@ -33,8 +33,7 @@ namespace JbTlsClientWinForms
             {
                 logger.Debug(telegramMessage.ToString());
                 telegramMessage.Text = "Received: " + telegramMessage.Text;
-
-                jBTlsClient.Send(telegramMessage.Serialize(), JBTlsClient.MessageType.DATA);
+                jBTlsClient.SendAsync(telegramMessage.Serialize());
             }
             else
                 logger.Error("Recived wrong TelegramMessage");

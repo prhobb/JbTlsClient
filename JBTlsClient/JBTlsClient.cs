@@ -13,18 +13,22 @@ using System.Threading.Tasks;
 
 namespace JbTlsClientWinForms.Services.JBTlsClient
 {
-    internal class JBTlsClient
+    public class JBTlsClient
     {
         public enum MessageType : byte
         {
             NONE=0,
             DATA = 1,
-            KEEP_ALIVE = 2
+            KEEP_ALIVE = 2,
+            ACK = 3
         }
         const int PAYLOAD_SIZE_POSITION = 0;
-         const int HASH_POSITION = 4;
-         const int MESSAGETYPE_POSITION = 36;
-         const int PAYLOAD_POSITION = 37;
+        const int HASH_POSITION = 4;
+        const int MESSAGETYPE_POSITION = 36;
+        const int MESSAGENUMBER_POSITION = 37;
+        const int PAYLOAD_POSITION = 41;
+        const int READ_TIMEOUT = 70000;
+        const int MAX_PENDINGMESSAGE_AGE_SEC = 180;
 
         private const int bufferSize = 2048;
         private static NLog.Logger logger = NLog.LogManager.GetCurrentClassLogger();
@@ -38,6 +42,10 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
         SslStream sslStream;
         bool isSslStreamListening;
         CancellationTokenSource cts_sslStreamListenThread;
+        Dictionary<int, JbTlsMessage> pendingMessages;
+        private int messageNumber;
+
+        object sendLocker;
 
         public JBTlsClient(string serverAddress, int serverPort, JBTlsClientListener listener)
         {
@@ -45,6 +53,9 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
             this.serverAddress = serverAddress;
             this.serverPort = serverPort;
             this.listener = listener;
+            sendLocker = new object();
+            messageNumber = 0;
+            pendingMessages = new Dictionary<int, JbTlsMessage>();
         }
 
 
@@ -136,13 +147,20 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
         {
             if (sslStream != null)
             {
-                sslStream.Close();
-                logger.Warn("JbTlsClient остановлен");
+                try
+                {
+                    sslStream.Close();
+                }
+                catch (Exception ex)
+                {
+                    logger.Error(ex);
+                }
+                logger.Warn("JbTlsClient stopped");
             }
-                if (tcpClient != null && tcpClient.Connected)
+            if (tcpClient != null && tcpClient.Connected)
             {
                 tcpClient.Close();
-                logger.Warn("JbTlsClient остановлен");
+                logger.Warn("JbTlsClient stopped");
             }
         }
 
@@ -163,7 +181,7 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                     cts_sslStreamListenThread.Cancel();
                     cts_sslStreamListenThread.Dispose();
                 }
-                catch (ObjectDisposedException){ }
+                catch (ObjectDisposedException) { }
             }
 
             cts_sslStreamListenThread = new CancellationTokenSource();
@@ -182,12 +200,14 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                         new RemoteCertificateValidationCallback(ValidateServerCertificate),
                         new LocalCertificateSelectionCallback(SelectLocalCertificate)
                         );
-                    sslStream.ReadTimeout = 2000;
+                    sslStream.ReadTimeout = 8000;
+
                     // The server name must match the name on the server certificate.
                     try
                     {
                         sslStream.AuthenticateAsClient(serverAddress);
-                        sslStream.ReadTimeout = System.Threading.Timeout.Infinite;
+                        // sslStream.ReadTimeout = System.Threading.Timeout.Infinite;
+                        sslStream.ReadTimeout = READ_TIMEOUT;
                     }
                     catch (AuthenticationException e)
                     {
@@ -212,6 +232,28 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                     logger.Warn("JbTlsClient started");
                     //Start receive listening
                     Task.Run(() => SslStreamListenThread(cts_sslStreamListenThread.Token));
+                    //Resend Pending Messages
+                    try
+                    {
+                        foreach (var pendingmessage in pendingMessages)
+                            if ((DateTime.Now - pendingmessage.Value.Date).TotalSeconds < MAX_PENDINGMESSAGE_AGE_SEC)
+                            {
+                                logger.Info("Resend message. ID: {pendingmessage.Key} Date:{pendingmessage.Value.Date}", pendingmessage.Key, pendingmessage.Value.Date);
+                                Send(pendingmessage.Value.Buffer, MessageType.DATA, pendingmessage.Key, false);
+                            }
+                            else
+                            {
+                                pendingMessages.Remove(pendingmessage.Key);
+                                logger.Info("Removed message. ID: {pendingmessage.Key} Date:{pendingmessage.Value.Date}", pendingmessage.Key, pendingmessage.Value.Date);
+                            }
+                    }
+                    catch (TlsClientShouldBeReset ex)
+                    {
+                        logger.Error(ex);
+                        Reconnect();
+                    }
+
+
 
                     return true;
 
@@ -237,8 +279,11 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
 
                     byte[] sizeBuffer = new byte[4];
                     byte[] hashBuffer = new byte[32];
+                    byte[] messagenumberBuffer = new byte[4];
                     byte[] payloadBuffer = new byte[0];
+                    int messagenumber = 0;
                     MessageType messageType = MessageType.NONE;
+
                     for (int i = 0, paketLength = PAYLOAD_POSITION; i < paketLength; i++)
                     {
                         if (sslStream != null && sslStream.CanRead)
@@ -250,7 +295,7 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                             if (i == 0)
                             {
                                 if (receivedByte < 0) //First 4 bytes - size. This is int and should be positive, so first byte MUST > 0
-                                    throw new TlsClientShouldBeReset("FirstByte should be positive");                                
+                                    throw new TlsClientShouldBeReset("FirstByte should be positive");
                             }
 
                             //Read size
@@ -278,36 +323,53 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                             {
                                 messageType = (MessageType)(byte)receivedByte;
                             }
+                            //Read messagenumber
+                            else if (i < MESSAGENUMBER_POSITION + messagenumberBuffer.Length && i >= MESSAGENUMBER_POSITION)
+                            {
+                                messagenumberBuffer[i - MESSAGENUMBER_POSITION] = (byte)receivedByte;
+                                if (i == MESSAGENUMBER_POSITION + sizeBuffer.Length - 1)
+                                {
+                                    if (BitConverter.IsLittleEndian)
+                                        Array.Reverse(messagenumberBuffer);
+                                    messagenumber = BitConverter.ToInt32(messagenumberBuffer, 0);
+                                    if (messagenumber < 0) throw new TlsClientShouldBeReset("Messagenumber should be positive");
+                                }
+                            }
+
                             //Read payload
                             else if (i < PAYLOAD_POSITION + payloadBuffer.Length && i >= PAYLOAD_POSITION)
                             {
                                 payloadBuffer[i - PAYLOAD_POSITION] = (byte)receivedByte;
                             }
 
-                                //Checking after full message received
-                                if (i == paketLength - 1)
+                            //Checking after full message received
+                            if (i == paketLength - 1)
+                            {
+
+                                switch (messageType)
                                 {
-
-                                    switch (messageType)
-                                    {
-                                        case MessageType.DATA:
-                                            //Check received data hash
-                                            if (!checkHash(payloadBuffer, hashBuffer))
-                                                throw new TlsClientShouldBeReset("Wrong hash.");
-                                            //Run listener if all is fine
-                                            listener.OnSslReceive(payloadBuffer);
-                                            break;
-                                        case MessageType.KEEP_ALIVE:
-                                        Send(null, MessageType.KEEP_ALIVE);
-                                            break;
-                                    }
+                                    case MessageType.DATA:
+                                        //Check received data hash
+                                        if (!checkHash(payloadBuffer, hashBuffer))
+                                            throw new TlsClientShouldBeReset("Wrong hash.");
+                                        //Run listener if all is fine
+                                        listener.OnSslReceive(payloadBuffer);
+                                        Send(null, MessageType.ACK, messagenumber, true);
+                                        break;
+                                    case MessageType.KEEP_ALIVE:
+                                        Send(null, MessageType.KEEP_ALIVE, 0, true);
+                                        break;
+                                    case MessageType.ACK:
+                                        OnAckReceive(messagenumber);
+                                        break;
                                 }
-
                             }
+
+                        }
                         else
                             throw new TlsClientShouldBeReset("sslStream is null or can't be read");
                     }
-                  
+
 
                     /*
                     if (sslStream != null && sslStream.CanRead)
@@ -375,48 +437,93 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                 if (!cancellationToken.IsCancellationRequested)
                     Reconnect();
             }
+            catch (IOException ex)
+            {
+                logger.Error(ex);
+                isSslStreamListening = false;
+                if (!cancellationToken.IsCancellationRequested)
+                    Reconnect();
+            }
             catch (Exception ex)
             {
                 logger.Error(ex);
-                isSslStreamListening = false;                
+                isSslStreamListening = false;
             }
 
             isSslStreamListening = false;
             logger.Warn("SslStreamListenThread stopped");
         }
-
-
-        public void Send(byte[] message, MessageType messageType)
+        public void OnAckReceive(int messagenumber)
         {
-            if (message == null && messageType!= MessageType.KEEP_ALIVE)
-                logger.Error("Can't send null message");
-            else
-            {
-                if (sslStream == null || !sslStream.CanWrite)
-                    throw new TlsClientShouldBeReset("Can't send message. Try to reconnet TlsClient");
+            pendingMessages.Remove(messagenumber);
+        }
 
-                byte[] buffer = GetSendBuffer(message, messageType);
-                if (buffer != null)
-                {
-                    logger.Debug("Send data: {buffer}", buffer);
-                    try
-                    {
-                        sslStream.Write(buffer);
-                        sslStream.Flush();
-                    }
-                    catch (Exception e)
-                    {
-                        logger.Error("Exception while sending message. Try to reconndect... ex: ", e);
-                        throw new TlsClientShouldBeReset("Exception while sending message. Try to reconndect...");
-                    }
-                }
+
+
+
+        async public void SendAsync(byte[] message)
+        {
+            if (messageNumber > 214748364)
+                messageNumber = 0;
+            else
+                messageNumber++;
+            pendingMessages.Add(messageNumber, new JbTlsMessage(messageNumber, DateTime.Now, message));
+
+            await Task.Run(() => Send(message, MessageType.DATA, messageNumber, false));
+
+
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="message"></param>
+        /// <param name="messageType"></param>
+        /// <param name="messageNumber"></param>
+        /// <exception cref="TlsClientShouldBeReset"></exception>
+        private void Send(byte[] message, MessageType messageType, int messageNumber, bool throwExeption)
+        {
+            lock (sendLocker)
+            {
+
+                if (message == null && messageType == MessageType.DATA)
+                    logger.Error("Can't send null message");
                 else
-                    logger.Error("Can't send null buffer");
+                {
+                    if (sslStream == null || !sslStream.CanWrite)
+                    {
+
+                        if (throwExeption)
+                            throw new TlsClientShouldBeReset("Can't send message. Try to reconnet TlsClient");
+                        else
+                            logger.Error("Can't send message. Try to reconnet TlsClient");
+                    }
+
+                    byte[] buffer = GetSendBuffer(message, messageType, messageNumber);
+                    if (buffer != null)
+                    {
+                        logger.Debug("Send data: {buffer}", buffer);
+                        try
+                        {
+                            sslStream.Write(buffer);
+                            sslStream.Flush();
+                        }
+                        catch (Exception e)
+                        {
+                            logger.Error("Exception while sending message. Try to reconndect... ex: ", e);
+                            if (throwExeption)
+                                throw new TlsClientShouldBeReset("Exception while sending message. Try to reconndect...");
+
+                        }
+                    }
+                    else
+                        logger.Error("Can't send null buffer");
+                }
             }
         }
-        private static byte[] GetSendBuffer(byte[] message, MessageType messageType)
+        private static byte[] GetSendBuffer(byte[] message, MessageType messageType, int messageNumber)
         {
-            //Структура. 0-bit--3bit: Payload size, 4-bit--35bit: Hash, 36bit: MessageType, 37-bit--end: Payload
+            //Структура. 0-byte--3byte: Payload size, 4-byte--35byte: Hash, 36byte: MessageType, 37-byte--40byte:messagenumber 41-byte--end: Payload
             if (message == null && messageType != MessageType.DATA)
                 message = new byte[1];
             //Calculate Hash
@@ -430,13 +537,20 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
                 result[0] = (byte)(message.Length >> 24);
                 result[1] = (byte)(message.Length >> 16);
                 result[2] = (byte)(message.Length >> 8);
-                result[3] = (byte)message.Length;                
+                result[3] = (byte)message.Length;
 
                 //Write Hash
                 hash.CopyTo(result, HASH_POSITION);
 
                 //Write MessageType
                 result[MESSAGETYPE_POSITION] = (byte)messageType;
+
+                //Write messagenumber
+                result[MESSAGENUMBER_POSITION] = (byte)(messageNumber >> 24);
+                result[MESSAGENUMBER_POSITION + 1] = (byte)(messageNumber >> 16);
+                result[MESSAGENUMBER_POSITION + 2] = (byte)(messageNumber >> 8);
+                result[MESSAGENUMBER_POSITION + 3] = (byte)messageNumber;
+
 
                 //Cope payload to result send buffer
                 message.CopyTo(result, PAYLOAD_POSITION);
@@ -446,6 +560,7 @@ namespace JbTlsClientWinForms.Services.JBTlsClient
 
             return null;
         }
+
 
         public static byte[] getHash256(byte[] message)
         {

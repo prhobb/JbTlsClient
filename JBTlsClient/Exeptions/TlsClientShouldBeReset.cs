@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 namespace JbTlsClientWinForms.Exeptions
 {
     
-    class TlsClientShouldBeReset : Exception
+    public class TlsClientShouldBeReset : Exception
     {
         public TlsClientShouldBeReset(String error) : base(error) { }
   

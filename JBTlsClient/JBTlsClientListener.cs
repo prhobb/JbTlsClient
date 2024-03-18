@@ -2,7 +2,7 @@
 
 namespace JbTlsClientWinForms.Services.JBTlsClient
 {
-    internal interface JBTlsClientListener
+    public interface JBTlsClientListener
     {
         public void OnSslReceive(byte[] buffer);
     }
